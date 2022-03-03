@@ -2,12 +2,12 @@
 #  Card/Game rules/generic stuff to be moved to separate files
 #
 import random
-from enum import Enum
+from enum import Enum, IntEnum
 import numpy as np
 
 
-class GameState(Enum):
-    BIDDING = 0
+class GameState(IntEnum):
+    BIDDING = 0,
     TRICK = 1
 
 
@@ -21,6 +21,10 @@ class Rank:
         else:
             self.shortname = shortname
 
+    def __eq__(self, other):
+        if (isinstance(other, Rank)):
+            return self.rank == other.rank
+
 
 class Suit:
     def __init__(self, name, shortname=''):
@@ -30,11 +34,19 @@ class Suit:
         else:
             self.shortname = shortname
 
+    def __eq__(self, other):
+        if (isinstance(other, Suit)):
+            return self.name == other.name
+
 
 class Card:
     def __init__(self, rank, suit):
         self.rank = rank
         self.suit = suit
+
+    def __eq__(self, other):
+        if (isinstance(other, Card)):
+            return self.rank == other.rank and self.suit == other.suit
 
     def __str__(self):
         return "{0} di {1}".format(self.rank.name, self.suit.name)
@@ -51,16 +63,16 @@ class Card:
 
 class Deck:
     ranks = [
-        Rank(9, 11, "Asso", "A"),
-        Rank(8, 10, "Tre", "3"),
-        Rank(7, 4, "Re", "R"),
-        Rank(6, 3, "Cavallo", "C"),
-        Rank(5, 2, "Fante", "F"),
-        Rank(4, 0, "Sette", "7"),
-        Rank(3, 0, "Sei", "6"),
-        Rank(2, 0, "Cinque", "5"),
+        Rank(0, 0, "Due", "2"),
         Rank(1, 0, "Quattro", "4"),
-        Rank(0, 0, "Due", "2")
+        Rank(2, 0, "Cinque", "5"),
+        Rank(3, 0, "Sei", "6"),
+        Rank(4, 0, "Sette", "7"),
+        Rank(5, 2, "Fante", "F"),
+        Rank(6, 3, "Cavallo", "C"),
+        Rank(7, 4, "Re", "R"),
+        Rank(8, 10, "Tre", "3"),
+        Rank(9, 11, "Asso", "A")
     ]
 
     suits = [
@@ -72,6 +84,27 @@ class Deck:
 
     def __init__(self):
         self.deck = [Card(r, s) for s in self.suits for r in self.ranks]
+
+    @staticmethod
+    def get_indexes(card):
+        """
+        :param card:
+        :return: tuple with the indexes of the Rank and Suit of card
+        """
+        ri = Deck.ranks.index(card.rank)
+        si = Deck.suits.index(card.suit)
+        return ri, si
+
+    @staticmethod
+    def get_card_from_index(i):
+        r = Deck.ranks[i % 10]
+        s = Deck.suits[i // 10]
+        return Card(r, s)
+
+    @staticmethod
+    def get_index_from_card(c):
+        ri, si = Deck.get_indexes(c)
+        return si * 10 + ri
 
 
 # Utility class for functionality specific to the game rules
@@ -110,46 +143,145 @@ class Player:
         self.points = 0
         self.id = id
 
+class BidType(Enum):
+    NONE = 0,
+    RANK = 1,
+    PASS = 2
+
+class Bid:
+    def __init__(self, type, rank=None):
+        self.type = type
+        self.rank = rank
+
+    def __str__(self):
+        if (self.type == BidType.NONE):
+            return "NONE"
+        elif (self.type == BidType.PASS):
+            return "PASS"
+        else:
+            return str(self.rank)
+
+class GameAction:
+    def __init__(self, phase, action):
+        if (phase == GameState.BIDDING):
+            self.bid = action
+        elif (phase == GameState.TRICK):
+            self.card = action
+
+    def get_card(self):
+        return self.card
+
+    def get_bid(self):
+        return self.bid
+
 
 class Game:
 
-    def __init__(self):
+    def __init__(self, seed=None):
         self.rules = Rules()
         self.np = self.rules.NUM_PLAYERS
         self.deck = Deck().deck
         self.players = []
+        self.winner = -1
+        self.rng = random
+
+    def seed(self, seed=None):
+        if (seed is None):
+            self.rng = random
+        else:
+            self.rng = random.Random(seed)
 
     def init_game(self):
-        random.shuffle(self.deck)
+        self.deck = Deck().deck
+        self.rng.shuffle(self.deck)
+        self.players = []
         for i in range(self.np):
             p = Player(i)
             p.hand = self.deck[8 * i: 8 * i + 8]
             self.players.append(p)
 
-        self.trump = Deck.suits[np.random.randint(len(Deck.suits))]  # TODO: temporarily fix trump
-        self.first_player = np.random.randint(self.np)  # TODO: temp fix
+        self.trump = Deck.suits[self.rng.randrange(0, len(Deck.suits))]  # TODO: temporarily fix trump
+        self.first_player = self.rng.randrange(0, self.np)  # TODO: temp fix
         self.current_player = self.first_player
         self.current_trick = []
         self.n_trick = 0
         self.done = False
-
-    def action_to_card(self, action):
-        return self.players[self.current_player].hand[action]
+        self.gamestate = GameState.BIDDING
+        self.bid_round = [Bid(BidType.NONE) for i in range(self.np)]
+        self.highest_bid = Bid(BidType.NONE)
+        self.caller = None
+        self.partner = None
+        self.highest_bidder = None
 
     def is_legal_card(self, card):
-        return card in self.players[self.current_player].hand
+        hand = self.players[self.current_player].hand
+        b = card in hand
+        return b
+
 
     def remove_played_card(self, card):
-        self.players[self.current_player].hand.remove(card)
+        hand = self.players[self.current_player].hand
+        b = card in hand
+        hand.remove(card)
 
-    # action comes from current_player
-    # TODO: temporarily action is an int representing the index of the card played by current_player
-    def step(self, action):
-        card = self.action_to_card(action)  # TODO: actions should be symbolic in this class
+
+    def get_player_hand(self, i):
+        return self.players[i].hand
+
+    def is_legal_bid(self, bid):
+        if (bid.type == BidType.NONE):
+            raise Exception("Player {0}: Bid type NONE".format(self.current_player))
+        if (bid.type == BidType.PASS):
+            # Pass is always legal provided the bidding phase is ongoing
+            return True
+        else: # bid.type == RANK
+            last_bid = self.bid_round[self.current_player]
+            if (last_bid.type == BidType.PASS):
+                # If the player passed last time, it cannot make an actual bid
+                return False
+            actual_bids = list(filter(lambda b: b.type == BidType.RANK, self.bid_round))
+            if (len(actual_bids) == 0):
+                return True
+            else:
+                highest_bid = min(actual_bids, key=lambda b: b.rank)
+                if (bid.rank < highest_bid.rank):
+                    return True
+                else:
+                    return False
+
+
+    def update_bid_round(self, bid):
+        self.bid_round[self.current_player] = bid
+        if (bid.type == BidType.RANK):
+            self.highest_bid = bid
+            self.highest_bidder = self.current_player
+
+    def step_bidding(self, action):
+        bid = action.get_bid()
+        if not self.is_legal_bid(bid):
+            raise Exception("Player {0}: Illegal bid {1}".format(self.current_player, bid))
+        self.update_bid_round(bid)
+        # Is bidding phase done? TODO: must consider the case where all players pass
+        actual_bids = list(filter(lambda b: b.type == BidType.RANK, self.bid_round))
+        pass_bids = list(filter(lambda b: b.type == BidType.PASS, self.bid_round))
+        if (len(actual_bids) == 1 and len(pass_bids) == self.np - 1):
+            # The bidding phase ends here, the trick phase begins
+            self.caller = self.highest_bidder
+            self.partner = self.caller # TODO
+            self.gamestate = GameState.TRICK
+            self.current_player = self.first_player
+        else:
+            self.current_player = (self.current_player + 1) % self.np
+
+
+    def step_trick(self, action):
+        card = action.get_card()
         # so this conversion from Gym space should happen in the env
-        if (not self.is_legal_card(card)):
-            Exception("Illegal card played {0}".format(card))
+        # print("a) Curr = {0}, card = {1}".format(self.current_player,card))
+        if not self.is_legal_card(card):
+            raise Exception("Player {0}: Illegal card played {1}".format(self.current_player, card))
         self.current_trick.append(card)
+        # print("Trick: {0} Curr = {1}, card = {2}".format(self.n_trick, self.current_player,card))
         self.remove_played_card(card)
 
         if (self.current_player + 1) % self.np == self.first_player:  # Trick end
@@ -165,6 +297,39 @@ class Game:
 
         if self.n_trick == 8:
             self.done = True
+            # TODO: sum points for caller and partner (if they are different)
+            # and set points accordingly
+            caller_points = self.players[self.caller].points
+            if (self.caller != self.partner):
+                caller_points += self.players[self.partner].points
+            other_points = 0
+            for p in self.players:
+                if (p != self.caller and p != self.partner):
+                    other_points += p.points
+            if (caller_points + other_points != 120):
+                raise Exception("Bug: total number of points != 120")
+            # TODO: update
+            self.winner = self.caller
+
+
+    # action comes from current_player
+    def step(self, action):
+        if (self.gamestate == GameState.BIDDING):
+            self.step_bidding(action)
+        elif (self.gamestate == GameState.TRICK):
+            self.step_trick(action)
+
+
+#
+# Utils
+#
+
+def two_hot_encode_card(card):
+    encoding = np.zeros(14)
+    ri, si = Deck.get_indexes(card)
+    encoding[ri] = 1
+    encoding[10 + si] = 1
+    return encoding
 
 
 #

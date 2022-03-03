@@ -10,7 +10,6 @@ def main():
     winner = -1
     e.render()
     for i, agent in enumerate(e.agent_iter()):
-        print(i)
         obs, rew, done, info = e.last()
         if done:
             continue

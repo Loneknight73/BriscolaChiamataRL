@@ -1,4 +1,5 @@
 import numpy as np
+import random
 
 
 class RandomAgent():
@@ -9,6 +10,5 @@ class RandomAgent():
         pass
 
     def act(self, obs):
-        hand = obs.players[self.player_id].hand
-        index = np.random.randint(len(hand))
-        return index  # TODO
+        c = random.choice(np.flatnonzero(obs['action_mask']))
+        return c
