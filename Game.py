@@ -8,7 +8,8 @@ import numpy as np
 
 class GameState(IntEnum):
     BIDDING = 0,
-    TRICK = 1
+    CHOOSE_TRUMP = 1,
+    TRICK = 2
 
 
 class Rank:
@@ -25,6 +26,9 @@ class Rank:
         if (isinstance(other, Rank)):
             return self.rank == other.rank
 
+    def __lt__(self, other):
+        if (isinstance(other, Rank)):
+            return self.rank < other.rank
 
 class Suit:
     def __init__(self, name, shortname=''):
@@ -102,6 +106,14 @@ class Deck:
         return Card(r, s)
 
     @staticmethod
+    def get_suit_from_index(i):
+        return Deck.suits[i]
+
+    @staticmethod
+    def get_rank_from_index(i):
+        return Deck.ranks[i]
+
+    @staticmethod
     def get_index_from_card(c):
         ri, si = Deck.get_indexes(c)
         return si * 10 + ri
@@ -159,12 +171,21 @@ class Bid:
         elif (self.type == BidType.PASS):
             return "PASS"
         else:
-            return str(self.rank)
+            return str(self.rank.shortname)
+
+class TrickInfo:
+    def __init__(self, cards, first_player, winner, points):
+        self.cards = cards
+        self.first_player = first_player
+        self.winner = winner
+        self.points = points
 
 class GameAction:
     def __init__(self, phase, action):
         if (phase == GameState.BIDDING):
             self.bid = action
+        elif (phase == GameState.CHOOSE_TRUMP):
+            self.trump = action
         elif (phase == GameState.TRICK):
             self.card = action
 
@@ -174,6 +195,8 @@ class GameAction:
     def get_bid(self):
         return self.bid
 
+    def get_trump(self):
+        return self.trump
 
 class Game:
 
@@ -200,9 +223,11 @@ class Game:
             p.hand.sort(key = lambda c: -Deck.get_index_from_card(c))
             self.players.append(p)
 
-        self.trump = Deck.suits[self.rng.randrange(0, len(Deck.suits))]  # TODO: temporarily fix trump
-        self.first_player = self.rng.randrange(0, self.np)  # TODO: temp fix
+        # TODO: temp fix; not clear actually how the first_player should be set; maybe it should be passed from
+        # whoever builds the environment
+        self.first_player = self.rng.randrange(0, self.np)
         self.current_player = self.first_player
+        self.tricks = []  # List of TrickInfo objects describing already completed tricks
         self.current_trick = []
         self.n_trick = 0
         self.done = False
@@ -211,23 +236,34 @@ class Game:
         self.highest_bid = Bid(BidType.NONE)
         self.caller = None
         self.partner = None
+        self.trump = None
+        self.partner_card = None
         self.highest_bidder = None
         self.game_points = [0 for i in range(self.np)]
+        self.caller_won = None
 
     def is_legal_card(self, card):
         hand = self.players[self.current_player].hand
         b = card in hand
         return b
 
+    def is_start_of_trick(self):
+        return self.current_player == self.first_player
+
+    def is_start_of_trick_phase(self):
+        return self.n_trick == 0 and self.is_start_of_trick()
 
     def remove_played_card(self, card):
         hand = self.players[self.current_player].hand
         b = card in hand
         hand.remove(card)
 
-
     def get_player_hand(self, i):
         return self.players[i].hand
+
+    #
+    # Bid phase related functions
+    #
 
     def is_legal_bid(self, bid):
         if (bid.type == BidType.NONE):
@@ -250,7 +286,6 @@ class Game:
                 else:
                     return False
 
-
     def update_bid_round(self, bid):
         self.bid_round[self.current_player] = bid
         if (bid.type == BidType.RANK):
@@ -268,18 +303,32 @@ class Game:
         if (len(actual_bids) == 1 and len(pass_bids) == self.np - 1):
             # The bidding phase ends here, the trick phase begins
             self.caller = self.highest_bidder
-            self.partner = self.caller # TODO
-            self.gamestate = GameState.TRICK
-            self.current_player = self.first_player
+            self.gamestate = GameState.CHOOSE_TRUMP
+            self.current_player = self.caller
         else:
             self.current_player = (self.current_player + 1) % self.np
+
+    #
+    # Choose trump related functions
+    #
+    def step_choose_trump(self, action):
+        self.trump = action.get_trump()
+        self.partner_card = Card(self.highest_bid.rank, self.trump)
+        self.current_player = self.first_player
+        self.gamestate = GameState.TRICK
+
+
+    #
+    # Trick phase related functions
+    #
 
     def manage_end_game(self):
         self.done = True
         # sum points for caller and partner (if they are different)
         # and set points accordingly
         caller_points = self.players[self.caller].points
-        if (self.caller != self.partner):
+        solo_game = True if (self.caller == self.partner) else False
+        if (not solo_game):
             caller_points += self.players[self.partner].points
         other_points = 0
         for p in self.players:
@@ -287,9 +336,21 @@ class Game:
                 other_points += p.points
         if (caller_points + other_points != 120):
             raise Exception("Bug: total number of points != 120")
-        if (self.caller == self.partner): # Solo game
+
+        self.caller_won = caller_points > other_points
+        if (solo_game): # Solo game
             self.game_points = [4 if p.id == self.caller else -1 for p in self.players]
-            self.game_points = [-x if (caller_points <= other_points) else x for x in self.game_points]
+            self.game_points = [-x if not self.caller_won else x for x in self.game_points]
+        else: # 2 (caller + partner) vs 3 (others)
+            for p in self.players:
+                if p.id == self.caller:
+                    self.game_points[p.id] = 2
+                elif p.id == self.partner:
+                    self.game_points[p.id] = 1
+                else:
+                    self.game_points[p.id] = -1
+            self.game_points = [-x if not self.caller_won else x for x in self.game_points]
+
 
     def step_trick(self, action):
         card = action.get_card()
@@ -300,11 +361,16 @@ class Game:
         self.current_trick.append(card)
         # print("Trick: {0} Curr = {1}, card = {2}".format(self.n_trick, self.current_player,card))
         self.remove_played_card(card)
+        # Has partner been unveiled?
+        if (card == self.partner_card):
+            self.partner = self.current_player
 
         # Manage normal trick
         if (self.current_player + 1) % self.np == self.first_player:  # Trick end
             (rel_win_id, points) = self.rules.winning_card(self.current_trick, self.trump)
             abs_win_id = (rel_win_id + self.first_player) % self.np
+            trick_info = TrickInfo(self.current_trick, self.first_player, abs_win_id, points)
+            self.tricks.append(trick_info)
             self.first_player = abs_win_id
             self.current_player = abs_win_id
             self.players[abs_win_id].points += points
@@ -321,6 +387,8 @@ class Game:
     def step(self, action):
         if (self.gamestate == GameState.BIDDING):
             self.step_bidding(action)
+        elif (self.gamestate == GameState.CHOOSE_TRUMP):
+            self.step_choose_trump(action)
         elif (self.gamestate == GameState.TRICK):
             self.step_trick(action)
 

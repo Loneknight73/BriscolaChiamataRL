@@ -8,7 +8,7 @@ from pettingzoo.utils import wrappers
 #
 # Env definition
 #
-from Game import Game, Deck, GameAction, GameState, Bid, BidType
+from Game import Game, Deck, GameAction, GameState, Bid, BidType, Rank
 
 
 def env():
@@ -29,9 +29,9 @@ def env():
 # Offsets in action space
 # TODO: should they be inside the class?
 TRICK_ACTIONS = 40
-BID_OFFSET = TRICK_ACTIONS
+CHOOSE_TRUMP_ACTIONS = 4
 BID_ACTIONS = 11
-TOTAL_ACTIONS = BID_OFFSET + BID_ACTIONS
+TOTAL_ACTIONS = BID_ACTIONS + CHOOSE_TRUMP_ACTIONS + TRICK_ACTIONS
 
 
 #
@@ -71,16 +71,19 @@ class BriscolaChiamataEnv(AECEnv):
         # Gym spaces are defined and documented here: https://gym.openai.com/docs/#spaces
         self.action_spaces = {agent: Dict({
             GameState.BIDDING: Discrete(BID_ACTIONS),  # 10 cards + pass. TODO: make it multidiscrete?
+            GameState.CHOOSE_TRUMP: Discrete(CHOOSE_TRUMP_ACTIONS),
             GameState.TRICK: Discrete(TRICK_ACTIONS)
         }) for agent in self.agents}
         self.observation_spaces = {agent: Dict({
+            # TODO: very preliminary for now
             'observation': Dict({
                 'gamestate': Discrete(len(GameState)),
                 'player_hand': Box(low=0, high=1, shape=(TRICK_ACTIONS,), dtype=bool)
             }),
             'action_mask': Dict({
-                GameState.BIDDING: Box(low=0, high=1, shape=(BID_ACTIONS,), dtype=bool),
-                GameState.TRICK: Box(low=0, high=1, shape=(TOTAL_ACTIONS,), dtype=bool)
+                GameState.BIDDING:      Box(low=0, high=1, shape=(BID_ACTIONS,), dtype=bool),
+                GameState.CHOOSE_TRUMP: Box(low=0, high=1, shape=(CHOOSE_TRUMP_ACTIONS,), dtype=bool),
+                GameState.TRICK:        Box(low=0, high=1, shape=(TOTAL_ACTIONS,), dtype=bool)
             })
         }) for agent in self.agents}
         self.reward_range = (-4, 4)  # TODO: adjust
@@ -124,9 +127,11 @@ class BriscolaChiamataEnv(AECEnv):
             if (a == 10):
                 x = Bid(BidType.PASS)
             else:
-                x = Bid(BidType.RANK, a)
-        else:
+                x = Bid(BidType.RANK, Deck.get_rank_from_index(a))
+        elif (state == GameState.TRICK):
             x = Deck.get_card_from_index(a)
+        elif (state == GameState.CHOOSE_TRUMP):
+            x = Deck.get_suit_from_index(a)
 
         ga = GameAction(self.game.gamestate, x)
         return ga
@@ -176,6 +181,7 @@ class BriscolaChiamataEnv(AECEnv):
         # as defined in __init__
         # Observation
         bid_mask   = np.zeros(BID_ACTIONS, 'bool')
+        ct_mask    = np.zeros(CHOOSE_TRUMP_ACTIONS, 'bool')
         trick_mask = np.zeros(TRICK_ACTIONS, 'bool')
 
         game = self.game
@@ -189,9 +195,11 @@ class BriscolaChiamataEnv(AECEnv):
                 if (highest_bid.type == BidType.NONE):
                     top_bid = 10
                 else:
-                    top_bid = highest_bid.rank
+                    top_bid = highest_bid.rank.rank
                 for i in range(top_bid):
                     bid_mask[i] = 1
+        elif (game.gamestate == GameState.CHOOSE_TRUMP):
+            ct_mask = np.ones(CHOOSE_TRUMP_ACTIONS, 'bool')
         elif (game.gamestate == GameState.TRICK):
             hand = game.get_player_hand(self.agent_name_mapping[agent])
             for c in hand:
@@ -199,6 +207,7 @@ class BriscolaChiamataEnv(AECEnv):
 
         mask_dict = {
             GameState.BIDDING: bid_mask,
+            GameState.CHOOSE_TRUMP: ct_mask,
             GameState.TRICK: trick_mask
         }
         obs_dict = {
@@ -206,6 +215,18 @@ class BriscolaChiamataEnv(AECEnv):
             'player_hand': trick_mask
         }
         return {'observation': obs_dict, 'action_mask': mask_dict}
+
+    def close(self):
+        '''
+        Close should release any graphical displays, subprocesses, network connections
+        or any other environment data which should not be kept around after the
+        user is no longer using the environment.
+        '''
+        pass
+
+    #
+    # Rendering related functions
+    #
 
     def render_bidding_round(self):
         s = "Bidding round:\n"
@@ -215,32 +236,60 @@ class BriscolaChiamataEnv(AECEnv):
         s += "\n"
         return s
 
-    def render_trick(self):
+    def render_trick(self, trick, first_player, n_players):
         game = self.game
+        col_width = 10
+        fmt = ""
+        s = ""
+        for i in range(n_players):
+            j = ("*" if (i == first_player) else "") + str(i)
+            s += "{:^{w}}".format(j, w=col_width)
+        s += "\n"
+        cards = ["" for i in range(n_players)]
+        for i, c in enumerate(trick):
+            cards[(first_player + i) % n_players] = c.shortname()
+        for i in range(n_players):
+            s += "{:^{w}}".format(cards[i], w=col_width)
+        s += "\n"
+        return s
+
+    # TODO: change all render support functions so that they only return a string
+    # and don't print anything. The only function to actually print must be render()
+    def render_trick_phase(self):
+        game = self.game
+        s = ""
+        for i in range(game.np):
+            s += "Player {0} cards: ".format(i)
+            for c in game.players[i].hand:
+                s+= "{0} ".format(c.shortname())
+            s += "\n"
+        s += "\nCurrent trick:\n"
+        if (game.is_start_of_trick() and game.n_trick > 0):
+            trick = game.tricks[game.n_trick - 1].cards
+            first_player = game.tricks[game.n_trick - 1].first_player
+        else:
+            trick = game.current_trick
+            first_player = game.first_player
+        s += self.render_trick(trick, first_player, game.np)
+        if (game.is_start_of_trick() and game.n_trick > 0):
+            s += "\nTrick won by {0}, getting {1} points\n".format(
+                game.tricks[game.n_trick - 1].winner,
+                game.tricks[game.n_trick - 1].points
+            )
+
         if (game.done):
+            s += "\n*********** Game ended ***********\n"
+            s += "Caller = {0}; Partner = {1}\n\n".format(game.caller, game.partner)
             for i in range(game.np):
-                print("Player {0} total points: {1}".format(i, game.players[i].points))
-            s = "Game points:\n"
+                s += "Player {0} total points: {1}\n".format(i, game.players[i].points)
+            s += "\n"
+            s += "Caller " + ("won" if (game.caller_won) else "lost") + "\n"
+            s += "Game points:\n"
             s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*range(game.np))
             s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*game.game_points)
-            print(s)
-        else:
-            for i in range(game.np):
-                print("Player {0} cards: ".format(i), end='')
-                for c in game.players[i].hand:
-                    print("{0} ".format(c.shortname()), end='')
-                print("")
-            s = "Current trick:\n"
-            s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*range(game.np))
-            trick = ["" for i in range(game.np)]
-            for i, c in enumerate(game.current_trick):
-                trick[(game.first_player + i) % game.np] = c.shortname()
-            s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*trick)
-            print(s)
-            if (len(self.game.current_trick) == 0 and
-                    self.game.n_trick > 0):
-                print("Trick won by {0}".format(self.game.first_player))
-            print("")
+
+        return s
+
 
     def render(self, mode='human'):
         """
@@ -252,22 +301,15 @@ class BriscolaChiamataEnv(AECEnv):
         if (game.gamestate == GameState.BIDDING):
             s += self.render_bidding_round()
             print(s)
-            # TODO: the last pass in the bidding round is not printed
-        else:
-            s = ""
-            if (game.n_trick == 0 and game.current_player == game.first_player):
-                # Print the last bidding round and the bidding results
-                s += self.render_bidding_round()
-                s += "\nCaller = {}".format(game.caller)
-                s += "\n\n"
-                print(s)
-            self.render_trick()
+        elif (game.gamestate == GameState.CHOOSE_TRUMP):
+            # Print the last bidding round and the bidding results
+            s += self.render_bidding_round()
+            s += "\nCaller = {}".format(game.caller)
+            print(s)
+        elif (game.gamestate == GameState.TRICK):
+            if (game.is_start_of_trick_phase()):
+                # Print the partner card
+                s += "Partner card is {0} ({1})\n\n".format(game.partner_card, game.partner_card.shortname())
+            s += self.render_trick_phase()
+            print(s)
 
-
-def close(self):
-    '''
-    Close should release any graphical displays, subprocesses, network connections
-    or any other environment data which should not be kept around after the
-    user is no longer using the environment.
-    '''
-    pass
