@@ -53,7 +53,7 @@ def env_creator(env_config):
 
 
 def briscolaMain():
-    ray.init(local_mode=True)
+    ray.init(local_mode=True) # TODO: don't use local_mode for actual training
     env = env_creator({})
     # ray.rllib.utils.check_env(env)
     register_env("BriscolaChiamata-v0", lambda config: PettingZooEnv(env_creator(config)))
@@ -73,7 +73,7 @@ def briscolaMain():
                      },
              local_dir="BriscolaChiamata-v0",
              checkpoint_freq=2,
-             #resume=True # Uncomment when doing actual experiments
+             #resume=True # TODO: Uncomment when doing actual experiments
              )
 
 

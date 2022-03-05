@@ -182,7 +182,6 @@ class Game:
         self.np = self.rules.NUM_PLAYERS
         self.deck = Deck().deck
         self.players = []
-        self.winner = -1
         self.rng = random
 
     def seed(self, seed=None):
@@ -198,6 +197,7 @@ class Game:
         for i in range(self.np):
             p = Player(i)
             p.hand = self.deck[8 * i: 8 * i + 8]
+            p.hand.sort(key = lambda c: -Deck.get_index_from_card(c))
             self.players.append(p)
 
         self.trump = Deck.suits[self.rng.randrange(0, len(Deck.suits))]  # TODO: temporarily fix trump
@@ -212,6 +212,7 @@ class Game:
         self.caller = None
         self.partner = None
         self.highest_bidder = None
+        self.game_points = [0 for i in range(self.np)]
 
     def is_legal_card(self, card):
         hand = self.players[self.current_player].hand
@@ -273,6 +274,22 @@ class Game:
         else:
             self.current_player = (self.current_player + 1) % self.np
 
+    def manage_end_game(self):
+        self.done = True
+        # sum points for caller and partner (if they are different)
+        # and set points accordingly
+        caller_points = self.players[self.caller].points
+        if (self.caller != self.partner):
+            caller_points += self.players[self.partner].points
+        other_points = 0
+        for p in self.players:
+            if (p.id != self.caller and p.id != self.partner):
+                other_points += p.points
+        if (caller_points + other_points != 120):
+            raise Exception("Bug: total number of points != 120")
+        if (self.caller == self.partner): # Solo game
+            self.game_points = [4 if p.id == self.caller else -1 for p in self.players]
+            self.game_points = [-x if (caller_points <= other_points) else x for x in self.game_points]
 
     def step_trick(self, action):
         card = action.get_card()
@@ -284,6 +301,7 @@ class Game:
         # print("Trick: {0} Curr = {1}, card = {2}".format(self.n_trick, self.current_player,card))
         self.remove_played_card(card)
 
+        # Manage normal trick
         if (self.current_player + 1) % self.np == self.first_player:  # Trick end
             (rel_win_id, points) = self.rules.winning_card(self.current_trick, self.trump)
             abs_win_id = (rel_win_id + self.first_player) % self.np
@@ -296,20 +314,7 @@ class Game:
             self.current_player = (self.current_player + 1) % self.np
 
         if self.n_trick == 8:
-            self.done = True
-            # TODO: sum points for caller and partner (if they are different)
-            # and set points accordingly
-            caller_points = self.players[self.caller].points
-            if (self.caller != self.partner):
-                caller_points += self.players[self.partner].points
-            other_points = 0
-            for p in self.players:
-                if (p != self.caller and p != self.partner):
-                    other_points += p.points
-            if (caller_points + other_points != 120):
-                raise Exception("Bug: total number of points != 120")
-            # TODO: update
-            self.winner = self.caller
+            self.manage_end_game()
 
 
     # action comes from current_player

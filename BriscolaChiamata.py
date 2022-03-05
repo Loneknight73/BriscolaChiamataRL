@@ -1,4 +1,3 @@
-import functools
 import random
 
 import numpy as np
@@ -26,6 +25,7 @@ def env():
     env = wrappers.OrderEnforcingWrapper(env)
     return env
 
+
 # Offsets in action space
 # TODO: should they be inside the class?
 TRICK_ACTIONS = 40
@@ -33,6 +33,15 @@ BID_OFFSET = TRICK_ACTIONS
 BID_ACTIONS = 11
 TOTAL_ACTIONS = BID_OFFSET + BID_ACTIONS
 
+
+#
+# TODO: this Env should be as independent as possible from
+# NN models peculiarities. For these, build a wrapper instead.
+# For the moment I keep the 2 concerns intertwined because I
+# don't know how to decouple the NN aspect from the env.
+# For example, rllib suggests to use wrappers around the environment,
+# but how can this work if the agents are mixed (e.g. 2 NN and 3 humans)?
+#
 class BriscolaChiamataEnv(AECEnv):
     '''
     The metadata holds environment constants. From gym, we inherit the "render.modes",
@@ -53,7 +62,7 @@ class BriscolaChiamataEnv(AECEnv):
         These attributes should not be changed after initialization.
         '''
         super().__init__()
-        self.rng_seed = random.randint(0, 2**32-1)
+        self.rng_seed = random.randint(0, 2 ** 32 - 1)
         self.game = Game()
         self.agents = ["player_" + str(r) for r in range(self.game.np)]
         self.possible_agents = self.agents[:]
@@ -61,14 +70,20 @@ class BriscolaChiamataEnv(AECEnv):
 
         # Gym spaces are defined and documented here: https://gym.openai.com/docs/#spaces
         self.action_spaces = {agent: Dict({
-            GameState.BIDDING: Discrete(BID_ACTIONS), # 10 cards + pass
+            GameState.BIDDING: Discrete(BID_ACTIONS),  # 10 cards + pass. TODO: make it multidiscrete?
             GameState.TRICK: Discrete(TRICK_ACTIONS)
         }) for agent in self.agents}
         self.observation_spaces = {agent: Dict({
-            'observation': Box(low=0, high=1, shape=(40,), dtype=bool), # TODO: make it a dict?
-            'action_mask': Box(low=0, high=1, shape=(TOTAL_ACTIONS,), dtype=bool),
+            'observation': Dict({
+                'gamestate': Discrete(len(GameState)),
+                'player_hand': Box(low=0, high=1, shape=(TRICK_ACTIONS,), dtype=bool)
+            }),
+            'action_mask': Dict({
+                GameState.BIDDING: Box(low=0, high=1, shape=(BID_ACTIONS,), dtype=bool),
+                GameState.TRICK: Box(low=0, high=1, shape=(TOTAL_ACTIONS,), dtype=bool)
+            })
         }) for agent in self.agents}
-        self.reward_range = (0, 1) # TODO: adjust
+        self.reward_range = (-4, 4)  # TODO: adjust
 
     def observation_space(self, agent):
         return self.observation_spaces[agent]
@@ -103,14 +118,15 @@ class BriscolaChiamataEnv(AECEnv):
         self.agent_selection = self.agents[self.game.current_player]
 
     def convert_action(self, action):
-        if (self.game.gamestate == GameState.BIDDING):
-            action -= BID_OFFSET
-            if (action == 10):
+        state = self.game.gamestate
+        a = action[state]
+        if (state == GameState.BIDDING):
+            if (a == 10):
                 x = Bid(BidType.PASS)
             else:
-                x = Bid(BidType.RANK, action)
+                x = Bid(BidType.RANK, a)
         else:
-            x = Deck.get_card_from_index(action)
+            x = Deck.get_card_from_index(a)
 
         ga = GameAction(self.game.gamestate, x)
         return ga
@@ -133,6 +149,8 @@ class BriscolaChiamataEnv(AECEnv):
             # the next done agent,  or if there are no more done agents, to the next live agent
             return self._was_done_step(action)
 
+        if not self.action_space(self.agent_selection).contains(action):
+            raise Exception("Action not in action_space")
         agent = self.agent_name_mapping[self.agent_selection]
 
         # the agent which stepped last had its _cumulative_rewards accounted for
@@ -145,8 +163,8 @@ class BriscolaChiamataEnv(AECEnv):
         self.agent_selection = self.agents[self.game.current_player]
         if (self.game.done):
             self.dones = {agent: True for agent in self.agents}
-            self.rewards = {agent: 0 for agent in self.agents}
-            self.rewards[self.agents[self.game.winner]] = 1 # TODO: get from game
+            for i, agent in enumerate(self.agents):
+                self.rewards[agent] = self.game.game_points[i]
         else:
             self._clear_rewards()
 
@@ -157,28 +175,37 @@ class BriscolaChiamataEnv(AECEnv):
         # TODO: convert Game observation to the format of observation_spaces
         # as defined in __init__
         # Observation
-        hand = self.game.get_player_hand(self.agent_name_mapping[agent])
-        o = np.zeros(40, 'bool')
-        for c in hand:
-            o[Deck.get_index_from_card(c)] = 1
-        # Action mask
-        am = np.zeros(TOTAL_ACTIONS, 'bool')
-        if (self.game.gamestate == GameState.BIDDING):
-            am[BID_OFFSET+BID_ACTIONS-1] = 1 # PASS is always legal
+        bid_mask   = np.zeros(BID_ACTIONS, 'bool')
+        trick_mask = np.zeros(TRICK_ACTIONS, 'bool')
+
+        game = self.game
+        # Action masks
+        if (game.gamestate == GameState.BIDDING):
+            bid_mask[BID_ACTIONS - 1] = 1  # PASS is always legal
             # If player was still in play, then bidding for a lower card is legal
-            last_bid = self.game.bid_round[self.game.current_player]
+            last_bid = game.bid_round[game.current_player]
             if (last_bid.type != BidType.PASS):
-                highest_bid = self.game.highest_bid
+                highest_bid = game.highest_bid
                 if (highest_bid.type == BidType.NONE):
                     top_bid = 10
                 else:
                     top_bid = highest_bid.rank
                 for i in range(top_bid):
-                    am[BID_OFFSET+i] = 1
-        else:
-            am[0:TRICK_ACTIONS] = o
+                    bid_mask[i] = 1
+        elif (game.gamestate == GameState.TRICK):
+            hand = game.get_player_hand(self.agent_name_mapping[agent])
+            for c in hand:
+                trick_mask[Deck.get_index_from_card(c)] = 1
 
-        return {'observation': o, 'action_mask': am}
+        mask_dict = {
+            GameState.BIDDING: bid_mask,
+            GameState.TRICK: trick_mask
+        }
+        obs_dict = {
+            'gamestate': game.gamestate,
+            'player_hand': trick_mask
+        }
+        return {'observation': obs_dict, 'action_mask': mask_dict}
 
     def render_bidding_round(self):
         s = "Bidding round:\n"
@@ -189,16 +216,27 @@ class BriscolaChiamataEnv(AECEnv):
         return s
 
     def render_trick(self):
-        if (self.game.done):
-            for i in range(self.game.np):
-                print("Player {0} total points: {1}".format(i, self.game.players[i].points))
-            print("Winner is Player {0}".format(self.game.winner))
+        game = self.game
+        if (game.done):
+            for i in range(game.np):
+                print("Player {0} total points: {1}".format(i, game.players[i].points))
+            s = "Game points:\n"
+            s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*range(game.np))
+            s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*game.game_points)
+            print(s)
         else:
-            for i in range(self.game.np):
+            for i in range(game.np):
                 print("Player {0} cards: ".format(i), end='')
-                for c in self.game.players[i].hand:
+                for c in game.players[i].hand:
                     print("{0} ".format(c.shortname()), end='')
                 print("")
+            s = "Current trick:\n"
+            s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*range(game.np))
+            trick = ["" for i in range(game.np)]
+            for i, c in enumerate(game.current_trick):
+                trick[(game.first_player + i) % game.np] = c.shortname()
+            s += "{0:^10} {1:^10} {2:^10} {3:^10} {4:^10}\n".format(*trick)
+            print(s)
             if (len(self.game.current_trick) == 0 and
                     self.game.n_trick > 0):
                 print("Trick won by {0}".format(self.game.first_player))
@@ -209,21 +247,27 @@ class BriscolaChiamataEnv(AECEnv):
         Renders the environment. In human mode, it can print to terminal, open
         up a graphical window, or open up some other display that a human can see and understand.
         """
-
+        game = self.game
         s = ""
-        # TODO: For now print only the cards for each player
-        if (self.game.gamestate == GameState.BIDDING):
+        if (game.gamestate == GameState.BIDDING):
             s += self.render_bidding_round()
             print(s)
             # TODO: the last pass in the bidding round is not printed
         else:
+            s = ""
+            if (game.n_trick == 0 and game.current_player == game.first_player):
+                # Print the last bidding round and the bidding results
+                s += self.render_bidding_round()
+                s += "\nCaller = {}".format(game.caller)
+                s += "\n\n"
+                print(s)
             self.render_trick()
 
 
 def close(self):
-        '''
-        Close should release any graphical displays, subprocesses, network connections
-        or any other environment data which should not be kept around after the
-        user is no longer using the environment.
-        '''
-        pass
+    '''
+    Close should release any graphical displays, subprocesses, network connections
+    or any other environment data which should not be kept around after the
+    user is no longer using the environment.
+    '''
+    pass
